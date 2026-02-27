@@ -1,25 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import argparse
 import csv
-import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
 
-# ─── Configuration via variables d'environnement ──────────────────────────────
-SONAR_URL   = os.environ.get("SONAR_URL", "").rstrip("/")
-SONAR_TOKEN = os.environ.get("SONAR_TOKEN", "")
-
-# ─── Paramètres ───────────────────────────────────────────────────────────────
-YEAR_HISTORY  = 2025
-SNAPSHOT_DATE = "2015-12-31"
-OUTPUT_DIR    = Path("sonar_exports")
-
 DEFAULT_METRICS = [
+    "alert_status",
     "bugs",
     "vulnerabilities",
     "code_smells",
@@ -32,323 +23,322 @@ DEFAULT_METRICS = [
     "lines",
 ]
 
-
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-
-def check_env():
-    """Vérifie que les variables d'environnement sont définies."""
-    if not SONAR_URL:
-        sys.exit("❌ Variable SONAR_URL non définie. Ex: export SONAR_URL=http://mon-sonar:9000")
-    if not SONAR_TOKEN:
-        sys.exit("❌ Variable SONAR_TOKEN non définie. Ex: export SONAR_TOKEN=mon_token")
+YEAR_HISTORY = 2025
 
 
-def build_session() -> requests.Session:
-    """Session authentifiée SonarQube via token Basic Auth."""
+def build_session(base_url: str, token: str) -> requests.Session:
+    """Cree une session HTTP authentifiee pour SonarQube."""
     session = requests.Session()
-    session.auth = (SONAR_TOKEN, "")
+    session.auth = (token, "")
     return session
 
 
-def parse_sonar_datetime(dt_str: str) -> datetime:
-    """Parse datetime SonarQube (ex: 2024-01-13T14:47:51+0200)."""
-    if len(dt_str) >= 5 and dt_str[-5] in ["+", "-"] and dt_str[-3] != ":":
-        dt_str = dt_str[:-2] + ":" + dt_str[-2:]
-    return datetime.fromisoformat(dt_str)
-
-
 def to_sonar_utc(dt: datetime) -> str:
-    """Convertit un datetime en format UTC attendu par SonarQube."""
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
+    """Formate une datetime en chaine UTC attendue par SonarQube."""
+    dt_utc = dt.astimezone(timezone.utc)
+    return dt_utc.strftime("%Y-%m-%dT%H:%M:%S+0000")
 
 
-# ─── Récupération des analyses via /api/ce/activity ───────────────────────────
-
-def get_all_ce_analyses(year: int, session: requests.Session, page_size: int = 500) -> list:
+def get_active_projects_from_ce_activity(
+    base_url: str,
+    session: requests.Session,
+    year: int,
+    page_size: int = 500,
+) -> dict:
     """
-    Récupère TOUTES les analyses (REPORT, SUCCESS) de l'année donnée
-    via /api/ce/activity uniquement (pas de /api/projects/search).
-    Retourne la liste de toutes les analyses avec :
-      - project_key, project_name
-      - analysis_id, task_id
-      - branch, pull_request
-      - executed_at, submitted_at
+    Utilise /api/ce/activity pour recuperer tous les projets
+    ayant lance au moins une analyse SUCCESS en {year}.
+    Retourne un dict { project_key: project_name }.
     """
-    url = urljoin(SONAR_URL, "/api/ce/activity")
+    url = urljoin(base_url, "/api/ce/activity")
     start = datetime(year, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-    end   = datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+    end = datetime(year, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
 
-    analyses = []
+    active_projects = {}
     page = 1
 
     while True:
         params = {
-            "type"        : "REPORT",
-            "status"      : "SUCCESS",
+            "type": "REPORT",
+            "status": "SUCCESS",
             "minExecutedAt": to_sonar_utc(start),
             "maxExecutedAt": to_sonar_utc(end),
-            "ps"          : page_size,
-            "p"           : page,
+            "ps": page_size,
+            "p": page,
         }
 
         resp = session.get(url, params=params)
-
         if resp.status_code == 403:
-            sys.exit("❌ Accès /api/ce/activity refusé (droits admin requis).")
-
+            print("  ⚠️  /api/ce/activity restreint (droits admin requis)")
+            return {}
         resp.raise_for_status()
-        data  = resp.json()
-        tasks = data.get("tasks", [])
+        data = resp.json()
 
+        tasks = data.get("tasks", [])
         if not tasks:
             break
 
         for task in tasks:
             component = task.get("component", {})
             key = component.get("key", "")
-            if not key or not task.get("analysisId"):
-                continue
-            analyses.append({
-                "project_key"  : key,
-                "project_name" : component.get("name", key),
-                "analysis_id"  : task.get("analysisId", ""),
-                "task_id"      : task.get("id", ""),
-                "branch"       : task.get("branch", ""),
-                "pull_request" : task.get("pullRequest", ""),
-                "executed_at"  : task.get("executedAt", ""),
-                "submitted_at" : task.get("submittedAt", ""),
-            })
+            name = component.get("name", key)
+            if key and key not in active_projects:
+                active_projects[key] = name
 
         paging = data.get("paging", {})
-        total  = paging.get("total", 0)
+        total = paging.get("total", 0)
         if page * page_size >= total:
             break
         page += 1
 
-    return analyses
+    return active_projects
 
 
-# ─── Métriques par analysisId ──────────────────────────────────────────────────
-
-def get_metrics_for_analysis(
+def get_metrics_history(
+    base_url: str,
     session: requests.Session,
     project_key: str,
-    analysis_id: str,
     metrics: list,
+    from_date: str,
+    to_date: str,
 ) -> dict:
     """
-    Récupère les valeurs des métriques pour une analyse précise
-    via /api/measures/component?analysisId=<id>.
+    Recupere l historique complet des metriques d un projet
+    via /api/measures/search_history.
+    Retourne un dict { date_str: { metric: value } }.
     """
-    url = urljoin(SONAR_URL, "/api/measures/component")
+    url = urljoin(base_url, "/api/measures/search_history")
+    page_size = 1000
+
+    history_by_date = {}
+
     params = {
-        "component" : project_key,
-        "analysisId": analysis_id,
-        "metricKeys": ",".join(metrics),
+        "component": project_key,
+        "metrics": ",".join(metrics),
+        "from": from_date,
+        "to": to_date,
+        "ps": page_size,
+        "p": 1,
     }
 
-    resp = session.get(url, params=params)
-    resp.raise_for_status()
+    while True:
+        resp = session.get(url, params=params)
+        if resp.status_code in [403, 404]:
+            print(f"  ⚠️  Acces refuse ou projet introuvable : {project_key}")
+            return {}
+        resp.raise_for_status()
+        data = resp.json()
 
-    result = {}
-    for m in resp.json().get("component", {}).get("measures", []):
-        result[m.get("metric")] = m.get("value", "")
-    return result
+        measures = data.get("measures", [])
+        for measure in measures:
+            metric = measure.get("metric", "")
+            for entry in measure.get("history", []):
+                date_str = entry.get("date", "")
+                value = entry.get("value", "")
+                if date_str not in history_by_date:
+                    history_by_date[date_str] = {}
+                history_by_date[date_str][metric] = value
+
+        paging = data.get("paging", {})
+        total = paging.get("total", 0)
+        current_page = params["p"]
+        if current_page * page_size >= total:
+            break
+        params["p"] += 1
+
+    return history_by_date
 
 
-# ─── Quality Gate par analysisId ──────────────────────────────────────────────
-
-def get_quality_gate_for_analysis(
-    session: requests.Session,
-    project_key: str,
-    analysis_id: str,
-) -> str:
+def get_last_snapshot(history_by_date: dict) -> dict:
     """
-    Récupère le statut du Quality Gate pour une analyse précise
-    via /api/qualitygates/project_status?analysisId=<id>.
-    Valeurs : OK, ERROR, WARN, NONE.
+    Retourne uniquement le snapshot de la DERNIERE date (date max).
     """
-    url = urljoin(SONAR_URL, "/api/qualitygates/project_status")
-    params = {"projectKey": project_key, "analysisId": analysis_id}
-
-    resp = session.get(url, params=params)
-    if resp.status_code in [403, 404]:
-        return ""
-    resp.raise_for_status()
-    return resp.json().get("projectStatus", {}).get("status", "")
+    if not history_by_date:
+        return {}
+    last_date = max(history_by_date.keys())
+    return {"date": last_date, "metrics": history_by_date[last_date]}
 
 
-# ─── Snapshot à la date précise ───────────────────────────────────────────────
-
-def export_snapshot(
-    analyses: list,
+def export_last_analysis(
+    base_url: str,
     session: requests.Session,
-    target_date: datetime,
+    active_projects: dict,
     metrics: list,
-    output_dir: Path,
+    output_path: Path,
+    from_date: str,
+    to_date: str,
 ):
     """
-    Pour chaque projet, trouve la dernière analyse AVANT ou ÉGALE à target_date,
-    récupère ses métriques + Quality Gate via analysisId,
-    et exporte le tout dans un seul fichier CSV snapshot.
+    Mode LAST : 1 seul CSV global avec la derniere analyse de chaque projet actif.
     """
-    print(f"\n📸 Génération snapshot au {target_date.strftime('%Y-%m-%d')}...")
-
-    # Groupement par projet
-    projects = {}
-    for a in analyses:
-        key = a["project_key"]
-        if key not in projects:
-            projects[key] = []
-        projects[key].append(a)
-
+    fieldnames = ["project_key", "project_name", "last_analysis_date"] + metrics
     rows = []
-    for project_key, project_analyses in projects.items():
-        # Analyses <= target_date
-        candidates = [
-            a for a in project_analyses
-            if a["executed_at"] and parse_sonar_datetime(a["executed_at"]) <= target_date
-        ]
-        if not candidates:
-            continue
 
-        # Dernière analyse avant la date cible
-        best = max(candidates, key=lambda x: parse_sonar_datetime(x["executed_at"]))
+    for project_key, project_name in active_projects.items():
+        print(f"  🔍 {project_key}")
 
-        metrics_data = get_metrics_for_analysis(session, project_key, best["analysis_id"], metrics)
-        qg_status    = get_quality_gate_for_analysis(session, project_key, best["analysis_id"])
+        history = get_metrics_history(
+            base_url, session, project_key, metrics, from_date, to_date
+        )
+        last = get_last_snapshot(history)
 
         row = {
-            "project_key"        : project_key,
-            "project_name"       : best["project_name"],
-            "analysis_id"        : best["analysis_id"],
-            "task_id"            : best["task_id"],
-            "executed_at"        : best["executed_at"],
-            "branch"             : best["branch"],
-            "pull_request"       : best["pull_request"],
-            "quality_gate_status": qg_status,
+            "project_key": project_key,
+            "project_name": project_name,
+            "last_analysis_date": last.get("date", ""),
         }
         for m in metrics:
-            row[m] = metrics_data.get(m, "")
+            row[m] = last.get("metrics", {}).get(m, "") if last else ""
+
         rows.append(row)
 
-    if not rows:
-        print("   ⚠️  Aucun projet avec analyse avant cette date.")
-        return
-
-    filename = output_dir / f"snapshot_{target_date.strftime('%Y%m%d')}.csv"
-    fieldnames = [
-        "project_key", "project_name", "analysis_id", "task_id",
-        "executed_at", "branch", "pull_request", "quality_gate_status",
-    ] + metrics
-
-    with open(filename, "w", newline="", encoding="utf-8") as f:
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"   ✅ {len(rows)} projets → {filename}")
+    print(f"
+  ✅ {len(rows)} projets exportes → {output_path.absolute()}")
 
 
-# ─── Historique 2025 ──────────────────────────────────────────────────────────
-
-def export_history(
-    analyses: list,
+def export_full_history(
+    base_url: str,
     session: requests.Session,
-    year: int,
+    active_projects: dict,
     metrics: list,
     output_dir: Path,
+    from_date: str,
+    to_date: str,
+    year: int,
 ):
     """
-    Pour chaque projet, exporte TOUTES les analyses de l'année
-    avec métriques + Quality Gate dans un CSV séparé.
-    Tri chronologique dans chaque fichier.
+    Mode HISTORY : 1 CSV par projet avec tout l historique de l annee.
     """
-    print(f"\n📈 Génération historique {year} (1 CSV par projet)...")
+    fieldnames = ["project_key", "project_name", "date"] + metrics
+    total_analyses = 0
 
-    # Groupement par projet
-    projects = {}
-    for a in analyses:
-        key = a["project_key"]
-        if key not in projects:
-            projects[key] = []
-        projects[key].append(a)
+    for project_key, project_name in active_projects.items():
+        print(f"  🔍 {project_key}")
 
-    total = 0
-    for project_key, project_analyses in projects.items():
+        history = get_metrics_history(
+            base_url, session, project_key, metrics, from_date, to_date
+        )
+
+        if not history:
+            print(f"  ⚠️  Aucune metrique pour {project_key}")
+            continue
+
+        sorted_dates = sorted(history.keys())
         rows = []
-
-        # Tri chronologique
-        for analysis in sorted(project_analyses, key=lambda x: parse_sonar_datetime(x["executed_at"])):
-            metrics_data = get_metrics_for_analysis(session, project_key, analysis["analysis_id"], metrics)
-            qg_status    = get_quality_gate_for_analysis(session, project_key, analysis["analysis_id"])
-
-            executed_dt = parse_sonar_datetime(analysis["executed_at"])
+        for date_str in sorted_dates:
             row = {
-                "project_key"        : project_key,
-                "project_name"       : analysis["project_name"],
-                "date"               : executed_dt.strftime("%Y-%m-%d"),
-                "executed_at"        : analysis["executed_at"],
-                "analysis_id"        : analysis["analysis_id"],
-                "task_id"            : analysis["task_id"],
-                "branch"             : analysis["branch"],
-                "pull_request"       : analysis["pull_request"],
-                "quality_gate_status": qg_status,
+                "project_key": project_key,
+                "project_name": project_name,
+                "date": date_str,
             }
             for m in metrics:
-                row[m] = metrics_data.get(m, "")
-
+                row[m] = history[date_str].get(m, "")
             rows.append(row)
 
-        filename = output_dir / f"{project_key}_history_{year}.csv"
-        if rows:
-            fieldnames = [
-                "project_key", "project_name", "date", "executed_at",
-                "analysis_id", "task_id", "branch", "pull_request",
-                "quality_gate_status",
-            ] + metrics
-            with open(filename, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(rows)
-            total += len(rows)
-            print(f"   ✅ {project_key}: {len(rows)} analyses → {filename.name}")
+        safe_key = project_key.replace("/", "_").replace(":", "_")
+        filename = output_dir / f"{safe_key}_history_{year}.csv"
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
 
-    print(f"   📊 Total : {total} analyses exportées")
+        total_analyses += len(rows)
+        print(f"  ✅ {project_key}: {len(rows)} analyses → {filename.name}")
 
+    return total_analyses
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    check_env()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Export metriques SonarQube : "
+            "filtre les projets actifs via /api/ce/activity "
+            "puis recupere l historique via /api/measures/search_history."
+        )
+    )
+    parser.add_argument("-u", "--url", required=True,
+                        help="URL SonarQube (ex: https://sonar.monsite.fr)")
+    parser.add_argument("-t", "--token", required=True,
+                        help="Token API SonarQube")
+    parser.add_argument("-m", "--metrics", nargs="+", default=DEFAULT_METRICS,
+                        help="Metriques a extraire")
+    parser.add_argument("-o", "--output-dir", default="sonar_export",
+                        help="Dossier de sortie")
+    parser.add_argument(
+        "--mode",
+        choices=["last", "history"],
+        default="last",
+        help=(
+            "last     = 1 CSV global avec la derniere analyse par projet
+"
+            "history  = 1 CSV par projet avec l historique complet"
+        ),
+    )
+    parser.add_argument("--year", type=int, default=YEAR_HISTORY,
+                        help="Annee de reference (defaut: 2025)")
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    session = build_session()
+    args = parser.parse_args()
 
-    print("🚀 EXPORT SONARQUBE OPTIMISÉ")
-    print(f"🔗 Serveur  : {SONAR_URL}")
-    print(f"📅 Snapshot : {SNAPSHOT_DATE}")
-    print(f"📊 Métriques: {', '.join(DEFAULT_METRICS)}")
-    print(f"📁 Sortie   : {OUTPUT_DIR.absolute()}")
+    year = args.year
+    from_date = f"{year}-01-01"
+    to_date = f"{year}-12-31"
 
-    # 1. UNIQUEMENT /api/ce/activity (pas de /api/projects/search)
-    print(f"\n🔍 Récupération analyses {YEAR_HISTORY} via /api/ce/activity...")
-    analyses = get_all_ce_analyses(YEAR_HISTORY, session)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(exist_ok=True)
 
-    if not analyses:
-        sys.exit(f"❌ Aucune analyse trouvée pour {YEAR_HISTORY}.")
+    base_url = args.url.rstrip("/")
+    session = build_session(base_url, args.token)
 
-    nb_projects = len(set(a["project_key"] for a in analyses))
-    print(f"   ✅ {len(analyses)} analyses → {nb_projects} projets actifs en {YEAR_HISTORY}")
+    print("=" * 65)
+    print("🚀  EXPORT SONARQUBE")
+    print(f"📡  URL     : {base_url}")
+    print(f"📅  Periode : {from_date}  →  {to_date}")
+    print(f"📊  Metriques : {', '.join(args.metrics)}")
+    print(f"🔧  Mode    : {args.mode}")
+    print(f"💾  Sortie  : {output_dir.absolute()}")
+    print("=" * 65)
 
-    # 2. Snapshot à la date précise
-    target_date = datetime.strptime(SNAPSHOT_DATE, "%Y-%m-%d")
-    export_snapshot(analyses, session, target_date, DEFAULT_METRICS, OUTPUT_DIR)
+    # ------------------------------------------------------------------ #
+    # ETAPE 1 : projets actifs en {year} via /api/ce/activity             #
+    # ------------------------------------------------------------------ #
+    print(f"
+🔍 Etape 1 — Projets ayant une analyse SUCCESS en {year}...")
+    active_projects = get_active_projects_from_ce_activity(base_url, session, year)
 
-    # 3. Historique complet 2025
-    export_history(analyses, session, YEAR_HISTORY, DEFAULT_METRICS, OUTPUT_DIR)
+    if not active_projects:
+        print("❌ Aucun projet actif trouve (verifiez les droits admin).")
+        return
 
-    print(f"\n🎉 EXPORT TERMINÉ → {OUTPUT_DIR.absolute()}")
+    print(f"✅ {len(active_projects)} projets actifs trouves en {year}")
+
+    # ------------------------------------------------------------------ #
+    # ETAPE 2 : historique metriques via /api/measures/search_history     #
+    # ------------------------------------------------------------------ #
+    print(f"
+📈 Etape 2 — Extraction metriques via search_history...")
+
+    if args.mode == "last":
+        output_path = output_dir / f"sonar_last_analysis_{year}.csv"
+        export_last_analysis(
+            base_url, session, active_projects,
+            args.metrics, output_path, from_date, to_date
+        )
+
+    else:  # history
+        total = export_full_history(
+            base_url, session, active_projects,
+            args.metrics, output_dir, from_date, to_date, year
+        )
+        print(f"
+🎉 {total} analyses exportees au total")
+
+    print("
+✅ Export termine !")
 
 
 if __name__ == "__main__":
