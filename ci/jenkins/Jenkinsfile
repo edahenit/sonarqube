@@ -1,0 +1,184 @@
+// SonarQube 2026.1 LTA + JFrog Evidence Collection — projet Python sur Kubernetes
+//
+// Pipeline de référence sur le projet de test ../test-project.
+// Le pod Kubernetes embarque TROIS conteneurs :
+//   - build  : python:3.12-slim  (pip install, pytest --cov, python -m build)
+//   - sonar  : sonar-scanner-cli (analyse + publication au serveur SonarQube)
+//   - jfrog  : jfrog-cli-v2-jf   (upload wheel + build-publish + evidence signée)
+//
+// Les trois conteneurs partagent /home/jenkins/agent — donc `coverage.xml`,
+// `dist/*.whl` et `.scannerwork/report-task.txt` circulent sans artifact externe.
+//
+// Prérequis :
+//   - Kubernetes plugin Jenkins (cloud K8s configuré)
+//   - Credentials :
+//       * sonar-token            : Secret text  -> SONAR_TOKEN
+//       * jfrog-access-token     : Secret text  -> JF_ACCESS_TOKEN
+//       * evidence-signing-key   : Secret file  -> clé privée ED25519/RSA
+//   - Variables globales : SONAR_HOST_URL, JF_URL
+
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    pipeline: sonar-jfrog-evidence-python
+spec:
+  restartPolicy: Never
+  containers:
+    - name: build
+      image: python:3.12-slim
+      command: ["cat"]
+      tty: true
+      resources:
+        requests: { cpu: "500m", memory: "512Mi" }
+        limits:   { cpu: "2",    memory: "2Gi" }
+    - name: sonar
+      image: sonarsource/sonar-scanner-cli:latest
+      command: ["cat"]
+      tty: true
+      resources:
+        requests: { cpu: "500m", memory: "1Gi" }
+        limits:   { cpu: "2",    memory: "2Gi" }
+    - name: jfrog
+      image: releases-docker.jfrog.io/jfrog/jfrog-cli-v2-jf:latest
+      command: ["cat"]
+      tty: true
+      resources:
+        requests: { cpu: "200m", memory: "256Mi" }
+        limits:   { cpu: "1",    memory: "1Gi" }
+'''
+        }
+    }
+
+    options {
+        timestamps()
+    }
+
+    environment {
+        SONAR_HOST_URL     = "${env.SONAR_HOST_URL}"
+        JF_URL             = "${env.JF_URL}"
+        BUILD_NAME         = "${env.JOB_NAME}"
+        PYPI_REPO          = 'pypi-release-local'      // repo PyPI dans Artifactory
+        EVIDENCE_KEY_ALIAS = 'sonarqube-evidence-key'
+        PROJECT_DIR        = 'sonarqube/ci/test-project'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build & Test (Python)') {
+            steps {
+                container('build') {
+                    dir("${env.PROJECT_DIR}") {
+                        sh '''
+                            python -m pip install --upgrade pip build
+                            python -m pip install -e '.[dev]'
+                            # pyproject.toml configure déjà --cov + --junitxml
+                            pytest
+                            python -m build --wheel
+                        '''
+                    }
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true,
+                          testResults: "${env.PROJECT_DIR}/reports/pytest.xml"
+                }
+            }
+        }
+
+        stage('SonarQube analysis') {
+            steps {
+                container('sonar') {
+                    dir("${env.PROJECT_DIR}") {
+                        withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
+                            sh '''
+                                sonar-scanner \
+                                  -Dsonar.host.url=${SONAR_HOST_URL} \
+                                  -Dsonar.login=${SONAR_TOKEN} \
+                                  -Dsonar.qualitygate.wait=true
+                                # Les autres paramètres (projectKey, sources, coverage paths)
+                                # proviennent de sonar-project.properties.
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Publish wheel to Artifactory') {
+            steps {
+                container('jfrog') {
+                    dir("${env.PROJECT_DIR}") {
+                        withCredentials([string(credentialsId: 'jfrog-access-token', variable: 'JF_ACCESS_TOKEN')]) {
+                            sh '''
+                                jf config add artifactory \
+                                  --url=${JF_URL} \
+                                  --access-token=${JF_ACCESS_TOKEN} \
+                                  --interactive=false \
+                                  --overwrite=true
+
+                                jf rt upload "dist/*.whl" "${PYPI_REPO}/" \
+                                  --build-name=${BUILD_NAME} \
+                                  --build-number=${BUILD_NUMBER}
+
+                                jf rt build-publish ${BUILD_NAME} ${BUILD_NUMBER}
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Push Sonar evidence to JFrog') {
+            steps {
+                container('jfrog') {
+                    dir("${env.PROJECT_DIR}") {
+                        withCredentials([
+                            string(credentialsId: 'sonar-token',          variable: 'SONAR_TOKEN'),
+                            string(credentialsId: 'jfrog-access-token',   variable: 'JF_ACCESS_TOKEN'),
+                            file(  credentialsId: 'evidence-signing-key', variable: 'EVIDENCE_KEY_FILE')
+                        ]) {
+                            sh '''
+                                export SONAR_URL=${SONAR_HOST_URL}
+
+                                # Le fichier .scannerwork/report-task.txt a été produit
+                                # par le conteneur `sonar` (workspace de pod partagé).
+                                jf evd create \
+                                  --build-name=${BUILD_NAME} \
+                                  --build-number=${BUILD_NUMBER} \
+                                  --integration=sonar \
+                                  --key=${EVIDENCE_KEY_FILE} \
+                                  --key-alias=${EVIDENCE_KEY_ALIAS}
+                            '''
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts allowEmptyArchive: true,
+                             artifacts: "${env.PROJECT_DIR}/.scannerwork/report-task.txt, ${env.PROJECT_DIR}/dist/*.whl, ${env.PROJECT_DIR}/coverage.xml"
+        }
+    }
+}

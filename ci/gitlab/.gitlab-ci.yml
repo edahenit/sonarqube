@@ -1,0 +1,123 @@
+# SonarQube 2026.1 LTA + JFrog Evidence Collection — projet Python sur Kubernetes
+#
+# Pipeline de référence sur le projet de test ../test-project.
+# Chaque job tourne dans son propre pod (runner Kubernetes) avec un conteneur
+# dédié :
+#   - build        : python:3.12-slim  (pytest --cov, python -m build)
+#   - sonar-scan   : sonar-scanner-cli
+#   - publish/evd  : jfrog-cli-v2-jf
+#
+# Transfert entre pods via `artifacts:` GitLab.
+#
+# Prérequis :
+#   - Runner GitLab avec Kubernetes executor (tag `kubernetes`)
+#   - Variables CI/CD (masked + protected) :
+#       SONAR_HOST_URL, SONAR_TOKEN, JF_URL, JF_ACCESS_TOKEN,
+#       EVIDENCE_SIGNING_KEY (type: File), EVIDENCE_KEY_ALIAS
+
+stages:
+  - build
+  - analyze
+  - quality-gate
+  - publish
+  - evidence
+
+variables:
+  PYPI_REPO: "pypi-release-local"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.pip-cache"
+  PROJECT_DIR: "sonarqube/ci/test-project"
+
+default:
+  tags: [kubernetes]
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .pip-cache/
+
+# ---------- 1. Build + tests Python ----------
+build:
+  stage: build
+  image: python:3.12-slim
+  script:
+    - cd $PROJECT_DIR
+    - python -m pip install --upgrade pip build
+    - python -m pip install -e '.[dev]'
+    - pytest                          # -> coverage.xml + reports/pytest.xml
+    - python -m build --wheel         # -> dist/*.whl
+  artifacts:
+    when: always
+    expire_in: 1 day
+    paths:
+      - $PROJECT_DIR/dist/
+      - $PROJECT_DIR/coverage.xml
+      - $PROJECT_DIR/reports/pytest.xml
+    reports:
+      junit: $PROJECT_DIR/reports/pytest.xml
+
+# ---------- 2. Analyse SonarQube ----------
+sonar-scan:
+  stage: analyze
+  image: sonarsource/sonar-scanner-cli:latest
+  needs: ["build"]
+  script:
+    - cd $PROJECT_DIR
+    - sonar-scanner
+        -Dsonar.host.url=$SONAR_HOST_URL
+        -Dsonar.login=$SONAR_TOKEN
+        -Dsonar.qualitygate.wait=true
+  artifacts:
+    when: always
+    expire_in: 1 day
+    paths:
+      - $PROJECT_DIR/.scannerwork/report-task.txt
+
+# ---------- 3. Quality Gate ----------
+quality-gate:
+  stage: quality-gate
+  image: alpine:3.20
+  needs: ["sonar-scan"]
+  script:
+    - test -f $PROJECT_DIR/.scannerwork/report-task.txt
+    - echo "Quality Gate validé par SonarQube."
+
+# ---------- 4. Publication du wheel dans Artifactory ----------
+publish-build:
+  stage: publish
+  image: releases-docker.jfrog.io/jfrog/jfrog-cli-v2-jf:latest
+  needs: ["build", "quality-gate"]
+  script:
+    - cd $PROJECT_DIR
+    - jf config add artifactory
+        --url=$JF_URL
+        --access-token=$JF_ACCESS_TOKEN
+        --interactive=false
+        --overwrite=true
+    - jf rt upload "dist/*.whl" "$PYPI_REPO/"
+        --build-name=$CI_PROJECT_PATH_SLUG
+        --build-number=$CI_PIPELINE_ID
+    - jf rt build-publish $CI_PROJECT_PATH_SLUG $CI_PIPELINE_ID
+
+# ---------- 5. Preuve Sonar signée vers JFrog ----------
+sonar-evidence:
+  stage: evidence
+  image: releases-docker.jfrog.io/jfrog/jfrog-cli-v2-jf:latest
+  variables:
+    SONAR_URL: $SONAR_HOST_URL
+    SONAR_REPORT_TASK_FILE: .scannerwork/report-task.txt
+  needs:
+    - job: sonar-scan
+      artifacts: true
+    - job: publish-build
+  script:
+    - cd $PROJECT_DIR
+    - jf config add artifactory
+        --url=$JF_URL
+        --access-token=$JF_ACCESS_TOKEN
+        --interactive=false
+        --overwrite=true
+    - jf evd create
+        --build-name=$CI_PROJECT_PATH_SLUG
+        --build-number=$CI_PIPELINE_ID
+        --integration=sonar
+        --key="$EVIDENCE_SIGNING_KEY"
+        --key-alias=$EVIDENCE_KEY_ALIAS
