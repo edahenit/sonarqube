@@ -3,28 +3,30 @@
 > **Target audience:** Developers, Tech Leads, Quality Teams
 > **Prerequisites:** SonarQube Data Center already installed and AI CodeFix enabled by your administrator
 > **Version:** SonarQube Server **2026.2**
+> **LLM Configuration:** Self-Hosted Gateway (OpenAI-compatible)
 
 ---
 
 ## Table of Contents
 
 1. [What is Sonar AI CodeFix?](#what-is-sonar-ai-codefix)
-2. [How to access AI CodeFix?](#how-to-access-ai-codefix)
-3. [Using AI CodeFix in SonarQube (Web UI)](#using-ai-codefix-in-sonarqube-web-ui)
-4. [Using AI CodeFix in your IDE](#using-ai-codefix-in-your-ide)
-5. [Understanding the proposed fix](#understanding-the-proposed-fix)
-6. [Supported languages and rules](#supported-languages-and-rules)
-7. [Best practices](#best-practices)
-8. [FAQ](#faq)
-9. [Additional resources](#additional-resources)
+2. [Self-hosted LLM architecture](#self-hosted-llm-architecture)
+3. [How to access AI CodeFix?](#how-to-access-ai-codefix)
+4. [Using AI CodeFix in SonarQube (Web UI)](#using-ai-codefix-in-sonarqube-web-ui)
+5. [Using AI CodeFix in your IDE](#using-ai-codefix-in-your-ide)
+6. [Understanding the proposed fix](#understanding-the-proposed-fix)
+7. [Supported languages and rules](#supported-languages-and-rules)
+8. [Best practices](#best-practices)
+9. [FAQ](#faq)
+10. [Additional resources](#additional-resources)
 
 ---
 
 ## What is Sonar AI CodeFix?
 
-**Sonar AI CodeFix** is a feature built into SonarQube Server (**Enterprise** and **Data Center** editions) that uses a Large Language Model (LLM) to **automatically suggest a code fix** for issues detected by Sonar analysis.
+**Sonar AI CodeFix** is a feature built into SonarQube Server (**Enterprise and Data Center editions**) that uses a Large Language Model (LLM) to **automatically suggest a code fix** for issues detected by Sonar analysis.
 
-Available in SonarQube Server 2026.2, the recommended model is **OpenAI GPT-5.1**, hosted by Sonar, with the option to use a private LLM (Azure OpenAI, AWS Bedrock, or a self-hosted gateway such as Ollama / LiteLLM / vLLM).
+In your configuration, the LLM used is a **self-hosted OpenAI-compatible model** (Self-Hosted Gateway). Your code never leaves your internal network.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -32,8 +34,8 @@ Available in SonarQube Server 2026.2, the recommended model is **OpenAI GPT-5.1*
 │                                                             │
 │  Sonar Analysis  →  Issue detected  →  Generate AI Fix      │
 │                                             ↓               │
-│                                    LLM analyses context     │
-│                             (GPT-5.1 or custom LLM)        │
+│                       Self-hosted LLM (OpenAI-compatible)   │
+│                           [your internal infrastructure]    │
 │                                             ↓               │
 │                                    Fix proposal (diff)      │
 │                                             ↓               │
@@ -47,7 +49,8 @@ Available in SonarQube Server 2026.2, the recommended model is **OpenAI GPT-5.1*
 - ✅ Takes into account the **file context** surrounding the issue
 - ✅ **Never applies anything automatically** — you stay in control
 - ✅ Available in the **web interface** and directly in your **IDE** (VS Code, IntelliJ)
-- ✅ Can operate **without outbound internet access** when using a self-hosted LLM
+- ✅ **No outbound internet required** — your code stays within your internal network
+- ✅ **No Sonar usage quotas** — monthly Sonar limits do not apply in self-hosted mode
 
 ### What AI CodeFix does NOT do
 
@@ -55,6 +58,43 @@ Available in SonarQube Server 2026.2, the recommended model is **OpenAI GPT-5.1*
 - ❌ Does not cover all issues (partial, certified rule coverage)
 - ❌ Does not replace human review of the proposed fix
 - ❌ Limited to **a single file** per fix
+
+---
+
+## Self-hosted LLM architecture
+
+In your configuration, SonarQube Data Center 2026.2 communicates directly with your **OpenAI-compatible LLM gateway** hosted within your infrastructure.
+
+```
+┌────────────────────────┐   HTTP(S)   ┌──────────────────────────┐
+│  SonarQube Server      │ ---------> │  Self-Hosted Gateway    │
+│  Data Center 2026.2   │            │  (OpenAI-compatible)    │
+│                        │            │                        │
+│  [AI CodeFix request]  │            │  Ollama / LiteLLM /    │
+│  snippet + Sonar rule  │            │  vLLM / other          │
+└────────────────────────┘            └──────────────────────────┘
+         |                                        |
+         |           INTERNAL NETWORK ONLY        |
+         └────────────────────────────────────────┘
+                   No outbound internet traffic
+```
+
+### Network requirement
+
+> The SonarQube Server instance must be able to **reach your LLM endpoint**. That is the only network requirement. No outbound internet access needs to be opened.
+
+### Administrator configuration (reference)
+
+The administrator configured AI CodeFix under **Administration > Configuration > General Settings > AI CodeFix** with the following parameters:
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| **Provider** | Self-Hosted Gateway | `openai-compatible` |
+| **API Endpoint URL** | URL of your internal gateway | `https://llm.internal.mycompany.com/v1` |
+| **API Key** | Authentication key for your gateway | `sk-xxxx...` |
+| **Model** | Model name served by your gateway | `gpt-4o`, `llama3`, `mistral`, etc. |
+| **Timeout** | Max wait time (ms) | `60000` |
+| **Authorized projects** | All or selected projects | per configuration |
 
 ---
 
@@ -66,12 +106,12 @@ AI CodeFix is available in **two ways** depending on your work environment:
 ┌────────────────────────┐       ┌────────────────────────────┐
 │   SonarQube Web UI     │       │   Connected IDE            │
 │                        │  or   │   VS Code / IntelliJ       │
-│  "Generate AI Fix"     │       │   (Connected Mode required)│
+│  "✨ Generate AI Fix"  │       │   (Connected Mode required)│
 │   button on issue      │       │   ✨ sparkle icon on issue  │
 └────────────────────────┘       └────────────────────────────┘
 ```
 
-> **Note:** The feature must have been enabled by your SonarQube administrator on your project. If you do not see the **Generate AI Fix** button, contact your admin.
+> **Note:** If you do not see the **✨ Generate AI Fix** button, either your project has not been authorized by your administrator, or the rule of the issue is not covered by AI CodeFix.
 
 ---
 
@@ -87,7 +127,7 @@ AI CodeFix is available in **two ways** depending on your work environment:
 
 ### Step 2 — Identify an issue eligible for AI CodeFix
 
-Eligible issues display a **✨ sparkle icon** or a **Generate AI Fix** button when you open the issue detail.
+Eligible issues display a **✨ sparkle icon** or a **✨ Generate AI Fix** button.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -104,9 +144,11 @@ Eligible issues display a **✨ sparkle icon** or a **Generate AI Fix** button w
 
 ### Step 3 — Generate the fix
 
-1. Click **Generate AI Fix**
-2. SonarQube sends the code snippet + rule description to the configured LLM
+1. Click **✨ Generate AI Fix**
+2. SonarQube sends the code snippet + rule description to your internal LLM gateway
 3. A fix proposal appears within a few seconds
+
+> ⏱️ Response time depends on your self-hosted LLM infrastructure performance.
 
 ### Step 4 — Review and apply
 
@@ -148,6 +190,7 @@ The plugin must be configured in **Connected Mode** to your SonarQube Data Cente
 3. Hover over the issue → SonarQube panel opens
 4. Open "Rule Description" tab → select "✨ AI CodeFix" tab
 5. Click "✨ Generate Fix"
+   └→ Request is sent to your internal LLM gateway
 6. Review the proposed diff in the editor
 7. Click "Apply" or "Decline"
 ```
@@ -161,7 +204,7 @@ The plugin must be configured in **Connected Mode** to your SonarQube Data Cente
 │                                                             │
 │  [Why is this an issue?]  [✨ AI CodeFix]                   │
 │                                                             │
-│  > ✨ Generate Fix                                          │
+│  > ✨ Generate Fix  → [internal LLM gateway]               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -172,6 +215,7 @@ The plugin must be configured in **Connected Mode** to your SonarQube Data Cente
 2. Sonar ✨ annotations are visible in the gutter
 3. Click the ✨ icon → Rule Description panel opens
 4. Select the "✨ AI CodeFix" tab → click "✨ Generate Fix"
+   └→ Request is sent to your internal LLM gateway
 5. Review the diff in the "Sonar AI Fix Preview" window
 6. Confirm with "Apply" or reject with "Decline"
 ```
@@ -189,12 +233,12 @@ The LLM receives two inputs to generate its proposal:
 │                          │    │  + good/bad code examples    │
 └──────────────────────────┘    └──────────────────────────────┘
                    ↓
-      GPT-5.1 (or configured LLM) generates a minimal patch
+     Your self-hosted OpenAI-compatible LLM generates a patch
                    ↓
          Diff displayed to the developer
 ```
 
-> **Privacy note:** If Sonar's hosted LLM is used, your code snippet is sent to the AI CodeFix service at `api.sonarqube.io`, but service agreements **prevent your code from being used to train models**. For self-hosted configurations, the code never leaves your network.
+> **Privacy:** In your self-hosted configuration, the code sent to the LLM **never leaves your internal network**. Sonar rule descriptions and prompts are embedded in the SonarQube Server installation and require no internet call.
 
 ### Confidence levels to keep in mind
 
@@ -209,7 +253,7 @@ The LLM receives two inputs to generate its proposal:
 
 ## Supported languages and rules
 
-AI CodeFix (2026.2) is available on a **certified selection of rules** validated by Sonar. Each rule goes through a testing and scoring process before being added to the AI CodeFix service.
+AI CodeFix (2026.2) is available on a **certified selection of rules** validated by Sonar for the following languages:
 
 | Language | AI CodeFix Coverage |
 |----------|---------------------|
@@ -224,11 +268,13 @@ AI CodeFix (2026.2) is available on a **certified selection of rules** validated
 
 > The full list of eligible rules per language is available in the [official Sonar documentation — SonarQube Server 2026.1 LTA](https://docs.sonarsource.com/sonarqube-server/2026.1/quality-standards-administration/managing-rules/rules-for-ai-codefix).
 
-### Why doesn't the "Generate AI Fix" button appear on some issues?
+### Why doesn't the "✨ Generate AI Fix" button appear on some issues?
 
-Two possible reasons:
-1. The **rule** for this issue is not yet covered by AI CodeFix (partial certified coverage)
-2. The **project** has not been authorized by your administrator — contact your admin
+| Reason | Action |
+|--------|--------|
+| The rule is not covered by AI CodeFix | Check the eligible rules list |
+| The project is not authorized by the admin | Contact your SonarQube administrator |
+| Connection error with the self-hosted LLM | Contact your SonarQube administrator |
 
 ---
 
@@ -240,7 +286,7 @@ Two possible reasons:
 - **Always review the diff** before applying, even for small fixes
 - **Test the corrected code** (compile + unit tests) before committing
 - **Use IDE mode** to apply fixes directly in your working branch
-- **Report incorrect fixes** via the Decline button to help Sonar improve the model
+- **Report incorrect fixes** via the Decline button
 
 ### ❌ Avoid
 
@@ -253,37 +299,37 @@ Two possible reasons:
 ## FAQ
 
 **Q: Does AI CodeFix automatically modify my code?**
-No. AI CodeFix **only proposes** a fix. You must click "Apply" to integrate the change. Nothing is modified without your explicit action.
+No. AI CodeFix **only proposes** a fix. You must click "Apply" to integrate the change.
 
 ---
 
 **Q: Is my code sent to an external service?**
-It depends on your administrator's configuration. If your instance uses a self-hosted LLM (Ollama, LiteLLM, vLLM), the code never leaves your network. If Sonar's hosted LLM is used, the snippet is sent to the AI CodeFix service via `api.sonarqube.io`, but contractual agreements prevent it from being used for model training.
-
----
-
-**Q: Does the issue remain open after applying the fix?**
-Yes, the issue stays open in SonarQube until the corrected code is **analysed** (next Sonar scan, typically on the next push/PR). Once the scan runs, if the fix resolves the issue, it automatically moves to **Closed** status.
-
----
-
-**Q: Can I use AI CodeFix on a Pull Request?**
-Yes. If your project is configured with PR analysis (GitHub, GitLab, Azure DevOps, Bitbucket), issues detected on the PR are eligible for AI CodeFix from the SonarQube interface or from the IDE in connected mode.
-
----
-
-**Q: What should I do if the proposal is incorrect or incomplete?**
-Click **Decline** and fix the issue manually. You can also click **Generate AI Fix** again to get a new proposal (the LLM may return a different result).
-
----
-
-**Q: Does AI CodeFix work on private projects?**
-Yes, provided the administrator has authorized the project in the AI CodeFix configuration of the SonarQube Data Center instance.
+**No.** In your self-hosted configuration, the code snippet is sent to your internal LLM gateway only. **No data leaves your network.** Sonar rule descriptions and prompts are embedded in the SonarQube installation.
 
 ---
 
 **Q: Are there usage limits?**
-Yes. Monthly quotas apply when using Sonar's hosted LLM. A notification appears when the limit is reached, and quotas reset on the first day of each month. There are no Sonar limits if you use a self-hosted LLM.
+**No.** Sonar's monthly quotas do not apply in self-hosted mode. Limits from your own LLM infrastructure (RAM, GPU, concurrency) may still apply.
+
+---
+
+**Q: Does the issue remain open after applying the fix?**
+Yes, until the next Sonar scan (push / PR). Once analysed, if the fix resolves the issue, it automatically moves to **Closed** status.
+
+---
+
+**Q: Can I use AI CodeFix on a Pull Request?**
+Yes. If your project is configured with PR analysis (GitHub, GitLab, Azure DevOps, Bitbucket), issues detected on the PR are eligible for AI CodeFix.
+
+---
+
+**Q: What if the generation fails or is slow?**
+In self-hosted mode, errors or slow responses usually come from your LLM gateway (insufficient resources, timeout too low). Contact your SonarQube administrator to check the provider configuration.
+
+---
+
+**Q: What should I do if the proposal is incorrect or incomplete?**
+Click **Decline** and fix the issue manually. You can also click **✨ Generate AI Fix** again to get a new proposal.
 
 ---
 
@@ -297,7 +343,6 @@ Yes. Monthly quotas apply when using Sonar's hosted LLM. A notification appears 
 | AI CodeFix in VS Code | [docs.sonarsource.com/sonarqube-for-vs-code](https://docs.sonarsource.com/sonarqube-for-vs-code/ai-capabilities/ai-codefix) |
 | AI CodeFix in IntelliJ | [docs.sonarsource.com/sonarqube-for-intellij](https://docs.sonarsource.com/sonarqube-for-intellij/ai-capabilities/ai-codefix) |
 | Sonar Community | [community.sonarsource.com](https://community.sonarsource.com) |
-| AI CodeFix Terms of Service | [sonarsource.com/legal/ai-codefix-terms](https://www.sonarsource.com/legal/ai-codefix-terms/) |
 
 ---
 
