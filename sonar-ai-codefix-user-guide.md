@@ -65,19 +65,8 @@ Dans votre configuration, le LLM utilisé est un **modèle auto-hébergé compat
 
 Dans votre configuration, SonarQube Data Center 2026.2 communique directement avec votre **gateway LLM compatible OpenAI** hébergée dans votre infrastructure.
 
-```
-┌────────────────────────┐   HTTP(S)   ┌──────────────────────────┐
-│  SonarQube Server      │ ---------> │  Self-Hosted Gateway    │
-│  Data Center 2026.2   │            │  (OpenAI-compatible)    │
-│                        │            │                        │
-│  [AI CodeFix request]  │            │  Ollama / LiteLLM /    │
-│  snippet + règle Sonar │            │  vLLM / autre          │
-└────────────────────────┘            └──────────────────────────┘
-         |                                        |
-         |         RéSEAU INTERNE UNIQUEMENT       |
-         └────────────────────────────────────────┘
-                  Aucun flux sortant vers internet
-```
+
+<img width="1203" height="679" alt="image" src="https://github.com/user-attachments/assets/c4fcad0b-e349-4f51-845a-b2e3c0265204" />
 
 ### Exigence réseau
 
