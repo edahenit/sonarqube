@@ -28,20 +28,8 @@
 
 Dans votre configuration, le LLM utilisé est un **modèle auto-hébergé compatible OpenAI** (Self-Hosted Gateway). Le code ne quitte jamais votre réseau interne.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    SONAR AI CODEFIX                         │
-│                                                             │
-│  Analyse Sonar  →  Issue détectée  →  Generate AI Fix       │
-│                                             ↓               │
-│                           LLM self-hosted (compatible OpenAI)│
-│                           [votre infrastructure interne]    │
-│                                             ↓               │
-│                                    Proposition de correctif │
-│                                             ↓               │
-│                          Développeur : ✅ Apply | ❌ Decline │
-└─────────────────────────────────────────────────────────────┘
-```
+<img width="1001" height="654" alt="image" src="https://github.com/user-attachments/assets/38d83bfd-e6d0-4ed6-9ff3-f7a10d183b10" />
+
 
 ### Ce que fait AI CodeFix
 
@@ -65,8 +53,8 @@ Dans votre configuration, le LLM utilisé est un **modèle auto-hébergé compat
 
 Dans votre configuration, SonarQube Data Center 2026.2 communique directement avec votre **gateway LLM compatible OpenAI** hébergée dans votre infrastructure.
 
+<img width="1151" height="654" alt="image" src="https://github.com/user-attachments/assets/feffcf58-bf60-4918-b97a-647f4242f73e" />
 
-<img width="1203" height="679" alt="image" src="https://github.com/user-attachments/assets/c4fcad0b-e349-4f51-845a-b2e3c0265204" />
 
 ### Exigence réseau
 
