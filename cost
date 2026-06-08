@@ -1,0 +1,23 @@
+Résumé des surcoûts avec TJM = 740 € HT
+Catégorie	Surcoût	Détail
+Licence AI CodeFix	✅ 0 €	Inclus dans Data Center
+Infra LLM	✅ 0 €	Fourni par service interne
+Infra SonarQube	✅ 0 €	DC 5 nœuds déjà actif
+One-Shot (upgrade + activation + formation)	~54 000 – 65 000 € HT	~73–88 JH × 740 €
+Marge risque + PoC (+15% one-shot)	~8 000 – 10 000 € HT	Recommandé an 1
+Récurrent / an (support 1 900 équipes)	~113 000 – 171 000 € HT/an	~153–231 JH × 740 €
+Totaux clés
+Horizon	Montant estimé (€ HT)
+Surcoût financier direct	0 €
+Budget Année 1	~175 000 – 246 000 € HT
+Budget Année 2+	~113 000 – 171 000 € HT/an
+Budget 3 ans	~400 000 – 580 000 € HT
+💡 Le fichier Excel est 100% paramétrable : modifiez le TJM en feuille Paramètres et tous les calculs se mettent à jour automatiquement.
+
+generer un fichier avec cette estimation
+
+Génération de l’estimation en fichier
+Génération du fichier avec l’estimation
+53s
+Laissez l’ordinateur construire cela pour vous
+L'ordinateur génère des documents et rapports complets à partir d'une seule invite. Il fournit des résultats finis sous forme de Google Docs, Word, PDF et plus encore.
